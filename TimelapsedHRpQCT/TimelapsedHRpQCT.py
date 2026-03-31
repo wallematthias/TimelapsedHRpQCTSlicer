@@ -77,6 +77,9 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
         except Exception:
             return False
 
+    def install_or_update_pipeline(self):
+        slicer.util.pip_install("timelapsed-hrpqct")
+
     def default_config_path(self):
         import timelapsedhrpqct
 
@@ -159,14 +162,22 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._refresh_patient_list()
 
     def _build_ui(self):
-        if not self.logic.is_pipeline_available():
-            warning = qt.QLabel(
-                "timelapsed-hrpqct is not installed in this Slicer Python environment.\n"
-                "Install from Slicer Python terminal: pip_install('timelapsed-hrpqct')"
-            )
-            warning.wordWrap = True
-            warning.styleSheet = "color: #cc5500;"
-            self.layout.addWidget(warning)
+        depBox = ctk.ctkCollapsibleButton()
+        depBox.text = "Dependency"
+        depForm = qt.QFormLayout(depBox)
+        self.pipelineStatusLabel = qt.QLabel()
+        self.installBtn = qt.QPushButton("Install / Update timelapsed-hrpqct")
+        self.checkBtn = qt.QPushButton("Check")
+        self.installBtn.clicked.connect(self._on_install_pipeline)
+        self.checkBtn.clicked.connect(self._on_check_pipeline)
+        rowWidget = qt.QWidget()
+        row = qt.QHBoxLayout(rowWidget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.installBtn)
+        row.addWidget(self.checkBtn)
+        depForm.addRow("Status", self.pipelineStatusLabel)
+        depForm.addRow(rowWidget)
+        self.layout.addWidget(depBox)
 
         form = qt.QFormLayout()
 
@@ -254,6 +265,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(loadBox)
         self.layout.addWidget(self.logText)
         self.layout.addStretch(1)
+        self._update_dependency_ui()
 
     def _dataset_root(self):
         p = self.inputPath.currentPath.strip()
@@ -331,6 +343,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run(commands[0])
 
     def _on_parse(self):
+        if not self.logic.is_pipeline_available():
+            slicer.util.errorDisplay("Please install timelapsed-hrpqct first.")
+            return
         root = self._dataset_root()
         if root is None:
             slicer.util.errorDisplay("Select or drop a dataset folder first.")
@@ -355,6 +370,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._show(f"[parse] discovered {len(sessions)} sessions under {root}")
 
     def _on_run_masks(self):
+        if not self.logic.is_pipeline_available():
+            slicer.util.errorDisplay("Please install timelapsed-hrpqct first.")
+            return
         root = self._dataset_root()
         if root is None:
             slicer.util.errorDisplay("Select a dataset root first.")
@@ -370,6 +388,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         )
 
     def _on_run_timelapse(self):
+        if not self.logic.is_pipeline_available():
+            slicer.util.errorDisplay("Please install timelapsed-hrpqct first.")
+            return
         root = self._dataset_root()
         if root is None:
             slicer.util.errorDisplay("Select a dataset root first.")
@@ -379,6 +400,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run(["run", str(root), "--mode", "regular", "--config", cfg])
 
     def _on_run_multistack(self):
+        if not self.logic.is_pipeline_available():
+            slicer.util.errorDisplay("Please install timelapsed-hrpqct first.")
+            return
         root = self._dataset_root()
         if root is None:
             slicer.util.errorDisplay("Select a dataset root first.")
@@ -388,6 +412,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run(["run", str(root), "--mode", "multistack", "--config", cfg])
 
     def _on_run_analysis(self):
+        if not self.logic.is_pipeline_available():
+            slicer.util.errorDisplay("Please install timelapsed-hrpqct first.")
+            return
         root = self._dataset_root()
         if root is None:
             slicer.util.errorDisplay("Select a dataset root first.")
@@ -414,6 +441,34 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._queued_commands = []
         self._refresh_patient_list()
+
+    def _on_install_pipeline(self):
+        self._show("[dependency] Installing/updating timelapsed-hrpqct ...")
+        try:
+            slicer.app.setOverrideCursor(qt.Qt.WaitCursor)
+            self.logic.install_or_update_pipeline()
+            self._show("[dependency] Installation finished.")
+            slicer.util.infoDisplay(
+                "timelapsed-hrpqct installation finished.\\n"
+                "If import problems persist, restart Slicer."
+            )
+        except Exception as exc:
+            slicer.util.errorDisplay(f"Install failed: {exc}")
+        finally:
+            slicer.app.restoreOverrideCursor()
+            self._update_dependency_ui()
+
+    def _on_check_pipeline(self):
+        self._update_dependency_ui()
+
+    def _update_dependency_ui(self):
+        available = self.logic.is_pipeline_available()
+        if available:
+            self.pipelineStatusLabel.text = "Installed"
+            self.pipelineStatusLabel.styleSheet = "color: #228b22;"
+        else:
+            self.pipelineStatusLabel.text = "Not installed"
+            self.pipelineStatusLabel.styleSheet = "color: #cc5500;"
 
     def _refresh_patient_list(self):
         root = self._dataset_root()
