@@ -45,12 +45,12 @@ class _DropArea(qt.QListWidget):
         event.acceptProposedAction()
 
     def _add_path(self, path):
-        existing = {self.item(i).text for i in range(self.count)}
+        existing = {self.item(i).text() for i in range(self.count)}
         if path not in existing:
             self.addItem(path)
 
     def paths(self):
-        return [self.item(i).text for i in range(self.count)]
+        return [self.item(i).text() for i in range(self.count)]
 
 
 class TimelapsedHRpQCT(ScriptedLoadableModule):
