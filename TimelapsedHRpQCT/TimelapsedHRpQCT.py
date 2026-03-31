@@ -194,6 +194,19 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         parseBtn.clicked.connect(self._on_parse)
         form.addRow(parseBtn)
 
+        self.parseSummaryLabel = qt.QLabel("Parse summary: not run")
+        self.parseSummaryLabel.wordWrap = True
+        form.addRow(self.parseSummaryLabel)
+
+        self.parseTable = qt.QTableWidget()
+        self.parseTable.setColumnCount(7)
+        self.parseTable.setHorizontalHeaderLabels(
+            ["Subject", "Site", "Session", "Stack", "Image", "Masks", "Seg"]
+        )
+        self.parseTable.horizontalHeader().setStretchLastSection(True)
+        self.parseTable.setMinimumHeight(160)
+        self.parseTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+
         settingsBox = ctk.ctkCollapsibleButton()
         settingsBox.text = "Exposed Settings"
         settingsForm = qt.QFormLayout(settingsBox)
@@ -260,6 +273,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.logText.setMinimumHeight(200)
 
         self.layout.addLayout(form)
+        self.layout.addWidget(self.parseTable)
         self.layout.addWidget(settingsBox)
         self.layout.addLayout(actionLayout)
         self.layout.addWidget(loadBox)
@@ -280,7 +294,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         return Path(os.path.commonpath([str(d) for d in dropped]))
 
     def _show(self, text):
-        self.logText.appendPlainText(text.rstrip())
+        message = text.rstrip()
+        if hasattr(self, "logText") and self.logText is not None:
+            self.logText.appendPlainText(message)
+        else:
+            print(message)
 
     def _settings_override(self):
         is_mineral = bool(self.mineralizationToggle.checked)
@@ -353,6 +371,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         sessions, err = self.logic.parse_input(root)
         if err:
+            self.parseTable.setRowCount(0)
+            self.parseSummaryLabel.text = "Parse summary: failed"
+            self.parseSummaryLabel.styleSheet = "color: #cc5500;"
             msg = (
                 f"Could not parse input from: {root}\n\n"
                 f"Error:\n{err}\n\n"
@@ -368,6 +389,34 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
 
         self._show(f"[parse] discovered {len(sessions)} sessions under {root}")
+        self._populate_parse_table(sessions)
+
+    def _populate_parse_table(self, sessions):
+        self.parseTable.setRowCount(len(sessions))
+        self.parseSummaryLabel.text = f"Parse summary: {len(sessions)} session(s) discovered"
+        self.parseSummaryLabel.styleSheet = "color: #228b22;"
+
+        for row, session in enumerate(sessions):
+            subject = str(getattr(session, "subject_id", ""))
+            site = str(getattr(session, "site", ""))
+            session_id = str(getattr(session, "session_id", ""))
+            stack_index = getattr(session, "stack_index", None)
+            stack_text = "-" if stack_index is None else str(stack_index)
+
+            raw_image = getattr(session, "raw_image_path", None)
+            image_name = Path(raw_image).name if raw_image else "-"
+
+            raw_masks = getattr(session, "raw_mask_paths", {}) or {}
+            mask_roles = ", ".join(sorted(str(k) for k in raw_masks.keys())) if raw_masks else "-"
+
+            seg_path = getattr(session, "raw_seg_path", None)
+            seg_text = "yes" if seg_path else "no"
+
+            values = [subject, site, session_id, stack_text, image_name, mask_roles, seg_text]
+            for col, value in enumerate(values):
+                self.parseTable.setItem(row, col, qt.QTableWidgetItem(value))
+
+        self.parseTable.resizeColumnsToContents()
 
     def _on_run_masks(self):
         if not self.logic.is_pipeline_available():
