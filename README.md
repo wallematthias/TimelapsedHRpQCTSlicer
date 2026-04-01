@@ -110,4 +110,4 @@ Notes:
 
 ## License
 
-AGPL-3.0-only
+MIT
