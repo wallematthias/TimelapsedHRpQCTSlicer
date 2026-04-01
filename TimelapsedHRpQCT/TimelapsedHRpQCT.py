@@ -102,21 +102,53 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
         self._temp_config_path = path
         return path
 
-    def parse_input(self, root_path, force_header_discovery=False):
+    def parse_input(self, root_path, parse_mode="auto"):
         try:
             from timelapsedhrpqct.config.loader import load_config
             from timelapsedhrpqct.dataset.discovery import discover_raw_sessions
 
             config = load_config(self.default_config_path())
-            sessions = discover_raw_sessions(
-                root_path,
-                config.discovery,
-                force_header_discovery=bool(force_header_discovery),
-                canonicalize_sessions=bool(force_header_discovery),
-            )
-            return sessions, None
+            mode = str(parse_mode or "auto").strip().lower()
+            if mode not in {"auto", "filename", "header"}:
+                mode = "auto"
+
+            if mode == "filename":
+                sessions = discover_raw_sessions(
+                    root_path,
+                    config.discovery,
+                    force_header_discovery=False,
+                    canonicalize_sessions=False,
+                )
+                return sessions, None, "filename"
+
+            if mode == "header":
+                sessions = discover_raw_sessions(
+                    root_path,
+                    config.discovery,
+                    force_header_discovery=True,
+                    canonicalize_sessions=True,
+                )
+                return sessions, None, "header"
+
+            # auto: prefer filename parse, then fall back to header parse.
+            try:
+                sessions = discover_raw_sessions(
+                    root_path,
+                    config.discovery,
+                    force_header_discovery=False,
+                    canonicalize_sessions=False,
+                )
+                return sessions, None, "filename"
+            except Exception:
+                sessions = discover_raw_sessions(
+                    root_path,
+                    config.discovery,
+                    force_header_discovery=True,
+                    canonicalize_sessions=True,
+                )
+                return sessions, None, "header"
         except Exception as exc:
-            return [], str(exc)
+            return [], str(exc), None
 
     def run_cli(self, args, on_output=None, on_finished=None):
         if self._proc is not None:
@@ -292,6 +324,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._sh_tree_hooks_installed = False
         self._is_full_pipeline_run = False
         self._run_includes_analysis = False
+        self._last_parse_mode_used = None
         self._updating_parse_table = False
         self._temp_input_root = None
         self._mask_method_defaults = {
@@ -354,9 +387,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         form.addRow(self.userMessageLabel)
 
         self.parseTable = qt.QTableWidget()
-        self.parseTable.setColumnCount(7)
+        self.parseTable.setColumnCount(8)
         self.parseTable.setHorizontalHeaderLabels(
-            ["Subject", "Site", "Session", "Stack", "Image", "Masks", "Seg"]
+            ["Subject", "Site", "Session", "Stack", "Image", "Masks", "Seg", "Original Session"]
         )
         self.parseTable.horizontalHeader().setStretchLastSection(False)
         self.parseTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.ResizeToContents)
@@ -432,17 +465,19 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.restructureRawCheck.toolTip = (
             "Move raw AIM files into results root sub-*/site-*/ses-* during import."
         )
-        self.forceHeaderDiscoveryCheck = qt.QCheckBox()
-        self.forceHeaderDiscoveryCheck.checked = False
-        self.forceHeaderDiscoveryCheck.toolTip = (
-            "Force import parsing from AIM header metadata instead of filename parsing."
+        self.parseModeCombo = qt.QComboBox()
+        self.parseModeCombo.addItems(["auto", "filename", "header"])
+        self.parseModeCombo.setCurrentText("auto")
+        self.parseModeCombo.toolTip = (
+            "Input parsing mode. 'auto' tries filename parsing first, "
+            "then falls back to header parsing."
         )
         _cap_width(self.copyRawInputsCheck, 220)
         _cap_width(self.restructureRawCheck, 220)
-        _cap_width(self.forceHeaderDiscoveryCheck, 220)
+        _cap_width(self.parseModeCombo, 220)
         maskForm.addRow("Copy raw inputs", self.copyRawInputsCheck)
         maskForm.addRow("Restructure raw inputs", self.restructureRawCheck)
-        maskForm.addRow("Force header discovery", self.forceHeaderDiscoveryCheck)
+        maskForm.addRow("Parse mode", self.parseModeCombo)
 
         registrationBox = qt.QGroupBox("Registration")
         registrationForm = qt.QFormLayout(registrationBox)
@@ -929,11 +964,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self._clear_user_message()
         self._set_stage_status("parse", "running")
-        sessions, err = self.logic.parse_input(
+        sessions, err, mode_used = self.logic.parse_input(
             root,
-            force_header_discovery=bool(
-                getattr(self.forceHeaderDiscoveryCheck, "checked", False)
-            ),
+            parse_mode=self._selected_parse_mode(),
         )
         if err:
             self.parseTable.setRowCount(0)
@@ -957,6 +990,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay(msg)
             return
 
+        self._last_parse_mode_used = mode_used
         self._show(f"[parse] discovered {len(sessions)} sessions under {root}")
         self._last_parsed_sessions = list(sessions)
         self._parsed_baseline_rows = [
@@ -971,7 +1005,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._populate_parse_table(sessions)
         self._refresh_patient_list()
         self._set_stage_status("parse", "done")
-        self._set_user_message("success", "Parse successful", f"Discovered {len(sessions)} session(s).")
+        mode_label = f" via {mode_used} mode" if mode_used else ""
+        self._set_user_message(
+            "success",
+            "Parse successful",
+            f"Discovered {len(sessions)} session(s){mode_label}.",
+        )
 
     def _site_options(self):
         return [
@@ -1151,8 +1190,23 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return ["--restructure-raw"]
         return []
 
+    def _selected_parse_mode(self):
+        mode = str(getattr(self.parseModeCombo, "currentText", "auto")).strip().lower()
+        if mode not in {"auto", "filename", "header"}:
+            return "auto"
+        return mode
+
+    def _effective_force_header_for_run(self):
+        mode = self._selected_parse_mode()
+        if mode == "header":
+            return True
+        if mode == "filename":
+            return False
+        # auto: if parse already resolved to header fallback, keep run consistent.
+        return str(self._last_parse_mode_used or "").strip().lower() == "header"
+
     def _raw_discovery_cli_flags(self):
-        if bool(getattr(self.forceHeaderDiscoveryCheck, "checked", False)):
+        if self._effective_force_header_for_run():
             return ["--force-header-discovery"]
         return []
 
@@ -1228,7 +1282,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self.parseTable.setRowCount(len(sessions))
             self.parseSummaryLabel.text = (
                 f"Parse summary: {len(sessions)} session(s) discovered "
-                "(Subject is editable. Site/Session are dropdown-correctable.)"
+                "(Subject is editable. Site/Session are dropdown-correctable; original session is read-only.)"
             )
             self.parseSummaryLabel.styleSheet = "color: #228b22;"
             site_options = self._site_options()
@@ -1238,6 +1292,9 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 subject = str(getattr(session, "subject_id", ""))
                 site = str(getattr(session, "site", ""))
                 session_id = str(getattr(session, "session_id", ""))
+                source_session_id = str(
+                    getattr(session, "source_session_id", "") or session_id
+                )
                 stack_index = getattr(session, "stack_index", None)
                 stack_text = "-" if stack_index is None else str(stack_index)
 
@@ -1281,7 +1338,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 self.parseTable.setItem(row, 3, stack_item)
 
                 # Read-only informative columns
-                for col, value in [(4, image_name), (5, mask_roles), (6, seg_text)]:
+                for col, value in [
+                    (4, image_name),
+                    (5, mask_roles),
+                    (6, seg_text),
+                    (7, source_session_id),
+                ]:
                     item = qt.QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
                     self.parseTable.setItem(row, col, item)
