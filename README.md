@@ -78,6 +78,18 @@ Before first public extension submission, complete:
 3. Tag a release in this repository.
 4. Submit to the Slicer Extensions Index.
 
+## ExtensionsIndex Submission
+
+This repository includes a submission template:
+
+- `TimelapsedHRpQCTSlicer.s4ext`
+
+To submit:
+
+1. Fork `Slicer/ExtensionsIndex`.
+2. Copy `TimelapsedHRpQCTSlicer.s4ext` into your fork (top-level extension entries).
+3. Open a PR to `Slicer/ExtensionsIndex`.
+
 ## License
 
 AGPL-3.0-only
