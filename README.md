@@ -1,6 +1,8 @@
-# TimelapsedHRpQCT Slicer Extension
+<p align="center">
+  <img src="resources/TimelapsedHRpQCTSlicer.png" alt="TimelapsedHRpQCTSlicer logo" width="320">
+</p>
 
-<img src="resources/TimelapsedHRpQCTSlicer.png" alt="TimelapsedHRpQCTSlicer logo" width="120" />
+# TimelapsedHRpQCT Slicer Extension
 
 3D Slicer scripted extension for running and reviewing the `timelapsed-hrpqct` pipeline.
 
