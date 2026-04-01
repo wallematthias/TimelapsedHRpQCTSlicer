@@ -272,6 +272,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._patient_keys = []
         self._sh_tree_hooks_installed = False
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = False
         self._mask_method_defaults = {
             "adaptive": (100.0, 300.0),
             "global": (100.0, 300.0),
@@ -843,6 +844,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._queued_commands = []
         self._queued_stages = []
         self._active_stage = None
+        self._run_includes_analysis = False
         self._set_running_ui(False)
         if cancelled or killed_external:
             extra = ""
@@ -962,6 +964,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._set_stage_status("masks", "pending")
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = False
         self._run_sequence(
             [
                 ["import", str(root), "--output-root", str(imported), "--config", cfg],
@@ -981,8 +984,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         if imported is None:
             return
         self._set_stage_status("registration", "pending")
+        self._set_stage_status("analysis", "pending")
         self._active_stage = "registration"
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = True
         cfg = self.logic.create_override_config(self._settings_override())
         self._run(["run", str(root), "--output-root", str(imported), "--mode", "regular", "--config", cfg])
 
@@ -997,8 +1002,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         if imported is None:
             return
         self._set_stage_status("registration", "pending")
+        self._set_stage_status("analysis", "pending")
         self._active_stage = "registration"
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = True
         cfg = self.logic.create_override_config(self._settings_override())
         self._run(["run", str(root), "--output-root", str(imported), "--mode", "multistack", "--config", cfg])
 
@@ -1015,6 +1022,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._set_stage_status("analysis", "pending")
         self._active_stage = "analysis"
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = False
         cfg = self.logic.create_override_config(self._settings_override())
         self._run([
             "analyse",
@@ -1058,6 +1066,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._set_stage_status(s, "pending")
         self._active_stage = "registration"
         self._is_full_pipeline_run = True
+        self._run_includes_analysis = True
         self._run(
             [
                 "run",
@@ -1087,6 +1096,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._queued_stages = []
             self._active_stage = None
             self._is_full_pipeline_run = False
+            self._run_includes_analysis = False
             self._refresh_patient_list()
             return
         if self._queued_commands and exit_code == 0:
@@ -1099,8 +1109,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         if self._is_full_pipeline_run and int(exit_code) == 0:
             for s in ("masks", "registration", "analysis"):
                 self._set_stage_status(s, "done")
+        elif self._run_includes_analysis and int(exit_code) == 0:
+            self._set_stage_status("analysis", "done")
         self._active_stage = None
         self._is_full_pipeline_run = False
+        self._run_includes_analysis = False
         self._refresh_patient_list()
         self._set_user_message("success", "Completed", "Requested step(s) finished successfully.")
 
