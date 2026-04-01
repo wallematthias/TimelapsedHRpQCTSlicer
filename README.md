@@ -51,12 +51,17 @@ This Slicer extension is a GUI wrapper around the main pipeline repository:
 
 ## Installation (Developer Mode)
 
+Use this flow until the extension appears in the Slicer Extensions Manager.
+
 1. Open Slicer.
 2. Go to `Edit -> Application Settings -> Modules`.
 3. Add module path:
    - `<repo>/TimelapsedHRpQCTSlicer/TimelapsedHRpQCT`
 4. Restart Slicer.
 5. Open module `TimelapsedHRpQCT`.
+6. In the module, click `Install / Update timelapsed-hrpqct`.
+7. Select your AIM dataset root and click `Parse input`.
+8. Run `Run Full` (or run specific stages).
 
 ## Runtime Dependency
 
