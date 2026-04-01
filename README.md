@@ -19,6 +19,9 @@ This Slicer extension is a GUI wrapper around the main pipeline repository:
 <p align="center">
   <img src="resources/screenshot-slicer-TimelapsedHRpQCT.png" alt="TimelapsedHRpQCT module screenshot" width="1000">
 </p>
+<p align="center">
+  <em>Example output: HR-pQCT scan of a knee (2 stacks), registered longitudinally, with formation sites in orange and resorption sites in purple. Data kindly provided by Dr. Sarah Manske.</em>
+</p>
 
 ## Modules
 
