@@ -335,6 +335,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._build_ui()
         self._load_defaults_from_pipeline_config()
         self._refresh_patient_list()
+        self._refresh_processing_subjects()
         self._set_3d_background_black()
 
     def _build_ui(self):
@@ -374,6 +375,14 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         parseBtn = qt.QPushButton("Parse input")
         parseBtn.clicked.connect(self._on_parse)
         form.addRow(parseBtn)
+
+        self.processingSubjectCombo = qt.QComboBox()
+        self.processingSubjectCombo.addItem("All subjects")
+        _cap_width(self.processingSubjectCombo, 260)
+        self.processingSubjectCombo.toolTip = (
+            "Choose which parsed subject to process. "
+            "'All subjects' runs the full cohort."
+        )
 
         self.parseSummaryLabel = qt.QLabel("Parse summary: not run")
         self.parseSummaryLabel.wordWrap = True
@@ -494,7 +503,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         _cap_width(self.tlSampling, 220)
         registrationForm.addRow("Timelapse sampling", self.tlSampling)
 
-        self.tlRes = qt.QSpinBox(); self.tlRes.minimum = 1; self.tlRes.maximum = 10; self.tlRes.value = 4
+        self.tlRes = qt.QSpinBox(); self.tlRes.minimum = 1; self.tlRes.maximum = 10; self.tlRes.value = 6
         self.tlIter = qt.QSpinBox(); self.tlIter.minimum = 1; self.tlIter.maximum = 5000; self.tlIter.value = 250
         _cap_width(self.tlRes, 220)
         _cap_width(self.tlIter, 220)
@@ -514,14 +523,48 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.useMultistackCheck.toolTip = (
             "When enabled, Timelapse Pipeline runs with multistack correction."
         )
+        self.msOverlapBuffer = qt.QSpinBox()
+        self.msOverlapBuffer.minimum = 0
+        self.msOverlapBuffer.maximum = 2000
+        self.msOverlapBuffer.value = 40
+        self.msOverlapBuffer.toolTip = (
+            "Extra z-slices (in voxels) added on both sides of overlap crop "
+            "for multistack superstack registration."
+        )
+        self.msInitTx = ctk.ctkDoubleSpinBox()
+        self.msInitTy = ctk.ctkDoubleSpinBox()
+        self.msInitTz = ctk.ctkDoubleSpinBox()
+        for sb in (self.msInitTx, self.msInitTy, self.msInitTz):
+            sb.minimum = -5000.0
+            sb.maximum = 5000.0
+            sb.decimals = 3
+            sb.singleStep = 1.0
+            sb.value = 0.0
+            sb.toolTip = "Initial multistack translation offset in voxels (X, Y, Z)."
+        self.msInitTz.value = -20.0
+        initTranslationRow = qt.QWidget()
+        initTranslationLayout = qt.QHBoxLayout(initTranslationRow)
+        initTranslationLayout.setContentsMargins(0, 0, 0, 0)
+        initTranslationLayout.setSpacing(6)
+        for label_text, widget in (("X", self.msInitTx), ("Y", self.msInitTy), ("Z", self.msInitTz)):
+            lbl = qt.QLabel(label_text)
+            lbl.setMinimumWidth(10)
+            initTranslationLayout.addWidget(lbl)
+            initTranslationLayout.addWidget(widget)
         _cap_width(self.msSampling, 220)
         _cap_width(self.msRes, 220)
         _cap_width(self.msIter, 220)
+        _cap_width(self.msOverlapBuffer, 220)
         _cap_width(self.useMultistackCheck, 220)
+        _cap_width(self.msInitTx, 90)
+        _cap_width(self.msInitTy, 90)
+        _cap_width(self.msInitTz, 90)
         registrationForm.addRow("Use multistack correction", self.useMultistackCheck)
         registrationForm.addRow("Multistack correction sampling", self.msSampling)
         registrationForm.addRow("Multistack correction resolutions", self.msRes)
         registrationForm.addRow("Multistack correction iterations", self.msIter)
+        registrationForm.addRow("Multistack overlap crop buffer (voxels)", self.msOverlapBuffer)
+        registrationForm.addRow("Multistack initial translation (voxels)", initTranslationRow)
 
         analysisBox = qt.QGroupBox("Analysis")
         analysisForm = qt.QFormLayout(analysisBox)
@@ -582,6 +625,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.progressBar.maximum = 5
         self.progressBar.value = 0
         self.currentStepLabel = qt.QLabel("Current step: idle")
+        statusForm.addRow("Processing subject", self.processingSubjectCombo)
         statusForm.addRow("Progress", self.progressBar)
         statusForm.addRow("Current", self.currentStepLabel)
         self.stageLabels = {}
@@ -799,7 +843,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._set_user_message("info", "Preset applied: High quality", _summary())
             return
         # Default
-        self.tlRes.value = 4
+        self.tlRes.value = 6
         self.tlIter.value = 250
         self.tlSampling.value = 0.001
         self.msRes.value = 4
@@ -826,6 +870,23 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 "adaptive": (adaptive_low, adaptive_high),
                 "global": (global_low, global_high),
             }
+
+            tl_cfg = cfg.get("timelapsed_registration") or {}
+            ms_cfg = cfg.get("multistack_correction") or {}
+            self.tlSampling.value = float(tl_cfg.get("sampling_percentage", float(self.tlSampling.value)))
+            self.tlRes.value = int(tl_cfg.get("number_of_resolutions", int(self.tlRes.value)))
+            self.tlIter.value = int(tl_cfg.get("number_of_iterations", int(self.tlIter.value)))
+            self.msSampling.value = float(ms_cfg.get("sampling_percentage", float(self.msSampling.value)))
+            self.msRes.value = int(ms_cfg.get("number_of_resolutions", int(self.msRes.value)))
+            self.msIter.value = int(ms_cfg.get("number_of_iterations", int(self.msIter.value)))
+            self.msOverlapBuffer.value = int(
+                ms_cfg.get("overlap_crop_buffer_voxels", int(self.msOverlapBuffer.value))
+            )
+            init_vox = ms_cfg.get("initial_translation_voxels", [0.0, 0.0, -20.0])
+            if isinstance(init_vox, (list, tuple)) and len(init_vox) >= 3:
+                self.msInitTx.value = float(init_vox[0])
+                self.msInitTy.value = float(init_vox[1])
+                self.msInitTz.value = float(init_vox[2])
             self._on_mask_method_changed(self.maskMethod.currentText)
         except Exception as exc:
             self._show(f"[settings] could not load defaults from pipeline config: {exc}")
@@ -876,6 +937,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 "sampling_percentage": float(self.msSampling.value),
                 "number_of_resolutions": int(self.msRes.value),
                 "number_of_iterations": int(self.msIter.value),
+                "overlap_crop_buffer_voxels": int(self.msOverlapBuffer.value),
+                "initial_translation_voxels": [
+                    float(self.msInitTx.value),
+                    float(self.msInitTy.value),
+                    float(self.msInitTz.value),
+                ],
             },
             "analysis": {
                 "thresholds": [float(self.analysisThreshold.value)],
@@ -974,6 +1041,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self.parseSummaryLabel.styleSheet = "color: #cc5500;"
             self._last_parsed_sessions = []
             self._parsed_baseline_rows = []
+            self._refresh_processing_subjects()
             self._set_stage_status("parse", "error")
             msg = (
                 "Could not parse file naming. Check that filenames include subject/session and use expected tokens."
@@ -1002,6 +1070,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             )
             for s in sessions
         ]
+        self._refresh_processing_subjects()
         self._populate_parse_table(sessions)
         self._refresh_patient_list()
         self._set_stage_status("parse", "done")
@@ -1057,6 +1126,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 except Exception:
                     pass
         self._refresh_patient_list()
+        self._refresh_processing_subjects()
 
     def _on_parse_site_changed(self, row, text):
         if self._updating_parse_table:
@@ -1068,6 +1138,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._last_parsed_sessions[row].site = site
         self._refresh_patient_list()
+        self._refresh_processing_subjects()
 
     def _on_parse_session_changed(self, row, text):
         if self._updating_parse_table:
@@ -1079,6 +1150,40 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             return
         self._last_parsed_sessions[row].session_id = session_id
         self._refresh_patient_list()
+        self._refresh_processing_subjects()
+
+    def _selected_processing_subject(self):
+        text = str(getattr(self.processingSubjectCombo, "currentText", "")).strip()
+        if not text or text == "All subjects":
+            return None
+        return text
+
+    def _sessions_for_processing_scope(self):
+        self._sync_sessions_from_parse_table()
+        sessions = list(self._last_parsed_sessions or [])
+        subject = self._selected_processing_subject()
+        if subject is None:
+            return sessions, None
+        scoped = [
+            s for s in sessions
+            if str(getattr(s, "subject_id", "")).strip() == subject
+        ]
+        return scoped, subject
+
+    def _refresh_processing_subjects(self):
+        prev = self._selected_processing_subject()
+        self.processingSubjectCombo.clear()
+        self.processingSubjectCombo.addItem("All subjects")
+        seen = set()
+        for s in (self._last_parsed_sessions or []):
+            subject = str(getattr(s, "subject_id", "")).strip()
+            if subject and subject not in seen:
+                seen.add(subject)
+                self.processingSubjectCombo.addItem(subject)
+        if prev and prev in seen:
+            idx = self.processingSubjectCombo.findText(prev)
+            if idx >= 0:
+                self.processingSubjectCombo.setCurrentIndex(idx)
 
     def _sanitize_name_token(self, text):
         token = re.sub(r"[^A-Za-z0-9]+", "_", str(text or "").strip())
@@ -1211,8 +1316,22 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         return []
 
     def _make_run_input_root(self, dataset_root: Path, ingest_mode: str = "none"):
+        return self._make_run_input_root_for_sessions(dataset_root, ingest_mode=ingest_mode)
+
+    def _make_run_input_root_for_sessions(
+        self,
+        dataset_root: Path,
+        ingest_mode: str = "none",
+        sessions: list | None = None,
+        force_virtual_root: bool = False,
+    ):
         self._sync_sessions_from_parse_table()
-        if not self._last_parsed_sessions or not self._has_parse_overrides():
+        selected_sessions = sessions if sessions is not None else list(self._last_parsed_sessions or [])
+        if not selected_sessions:
+            return dataset_root
+
+        has_overrides = self._has_parse_overrides()
+        if not force_virtual_root and not has_overrides:
             return dataset_root
 
         if ingest_mode == "restructure":
@@ -1237,7 +1356,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             except Exception:
                 shutil.copy2(src, dst)
 
-        for session in self._last_parsed_sessions:
+        for session in selected_sessions:
             subject_id = self._sanitize_name_token(getattr(session, "subject_id", ""))
             site_token = self._site_to_token(getattr(session, "site", "radius"))
             session_id = self._sanitize_name_token(getattr(session, "session_id", ""))
@@ -1271,9 +1390,8 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 created += 1
 
         self._temp_input_root = str(tmp_root)
-        self._show(
-            f"[parse] using corrected parse labels via virtual input root: {tmp_root} ({created} file links)"
-        )
+        mode_label = "scoped" if force_virtual_root and not has_overrides else "corrected"
+        self._show(f"[parse] using {mode_label} virtual input root: {tmp_root} ({created} file links)")
         return tmp_root
 
     def _populate_parse_table(self, sessions):
@@ -1383,7 +1501,16 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         except ValueError as exc:
             slicer.util.errorDisplay(str(exc))
             return
-        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        scoped_sessions, scoped_subject = self._sessions_for_processing_scope()
+        if scoped_subject and not scoped_sessions:
+            slicer.util.errorDisplay(f"No parsed sessions available for subject '{scoped_subject}'.")
+            return
+        run_root = self._make_run_input_root_for_sessions(
+            source_root,
+            ingest_mode=raw_ingest_mode,
+            sessions=scoped_sessions,
+            force_virtual_root=bool(scoped_subject),
+        )
         if run_root is None:
             return
 
@@ -1422,7 +1549,16 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         except ValueError as exc:
             slicer.util.errorDisplay(str(exc))
             return
-        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        scoped_sessions, scoped_subject = self._sessions_for_processing_scope()
+        if scoped_subject and not scoped_sessions:
+            slicer.util.errorDisplay(f"No parsed sessions available for subject '{scoped_subject}'.")
+            return
+        run_root = self._make_run_input_root_for_sessions(
+            source_root,
+            ingest_mode=raw_ingest_mode,
+            sessions=scoped_sessions,
+            force_virtual_root=bool(scoped_subject),
+        )
         if run_root is None:
             return
         mode = "multistack" if bool(self.useMultistackCheck.checked) else "regular"
@@ -1458,6 +1594,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         root = self._require_dataset_root()
         if root is None:
             return
+        scoped_subject = self._selected_processing_subject()
+        if scoped_subject is not None:
+            self._show(
+                f"[analysis] Processing subject is set to '{scoped_subject}', "
+                "but Re-run Analysis currently applies to the entire results dataset."
+            )
 
         imported = self._require_results_root("Could not resolve imported dataset path.")
         if imported is None:
@@ -1478,10 +1620,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             cfg,
         ])
 
-    def _auto_mode_from_sessions(self):
+    def _auto_mode_from_sessions(self, sessions=None):
+        candidate_sessions = sessions if sessions is not None else (self._last_parsed_sessions or [])
         has_multistack = any(
             getattr(s, "stack_index", None) is not None and int(getattr(s, "stack_index", 0)) > 1
-            for s in (self._last_parsed_sessions or [])
+            for s in candidate_sessions
         )
         return "multistack" if has_multistack else "regular"
 
@@ -1497,13 +1640,22 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         except ValueError as exc:
             slicer.util.errorDisplay(str(exc))
             return
-        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        scoped_sessions, scoped_subject = self._sessions_for_processing_scope()
+        if scoped_subject and not scoped_sessions:
+            slicer.util.errorDisplay(f"No parsed sessions available for subject '{scoped_subject}'.")
+            return
+        run_root = self._make_run_input_root_for_sessions(
+            source_root,
+            ingest_mode=raw_ingest_mode,
+            sessions=scoped_sessions,
+            force_virtual_root=bool(scoped_subject),
+        )
         if run_root is None:
             return
         imported = self._require_results_root("Could not resolve imported dataset path.")
         if imported is None:
             return
-        mode = self._auto_mode_from_sessions()
+        mode = self._auto_mode_from_sessions(scoped_sessions)
         cfg = self.logic.create_override_config(self._settings_override())
         self._set_user_message(
             "info",
