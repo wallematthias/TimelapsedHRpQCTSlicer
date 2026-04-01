@@ -26,7 +26,7 @@ class TimelapsedHRpQCT(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
         parent.title = "TimelapsedHRpQCT"
-        parent.categories = ["Bone"]
+        parent.categories = ["Quantification"]
         parent.dependencies = []
         parent.contributors = ["Matthias Walle"]
         parent.helpText = (
