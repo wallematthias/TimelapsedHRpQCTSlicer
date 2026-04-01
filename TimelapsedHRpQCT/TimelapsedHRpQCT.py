@@ -269,10 +269,13 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._active_stage = None
         self._stage_states = {}
         self._last_parsed_sessions = []
+        self._parsed_baseline_rows = []
         self._patient_keys = []
         self._sh_tree_hooks_installed = False
         self._is_full_pipeline_run = False
         self._run_includes_analysis = False
+        self._updating_parse_table = False
+        self._temp_input_root = None
         self._mask_method_defaults = {
             "adaptive": (100.0, 300.0),
             "global": (100.0, 300.0),
@@ -340,7 +343,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.parseTable.horizontalHeader().setStretchLastSection(False)
         self.parseTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.ResizeToContents)
         self.parseTable.setMinimumHeight(160)
-        self.parseTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.parseTable.setEditTriggers(
+            qt.QAbstractItemView.DoubleClicked
+            | qt.QAbstractItemView.EditKeyPressed
+            | qt.QAbstractItemView.SelectedClicked
+        )
+        self.parseTable.itemChanged.connect(self._on_parse_table_item_changed)
 
         parseBox = ctk.ctkCollapsibleButton()
         parseBox.text = "Parse Details"
@@ -453,14 +461,18 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         settingsLayout.addWidget(analysisBox)
 
         actionLayout = qt.QGridLayout()
-        self.runFullBtn = qt.QPushButton("Run Full")
-        self.runFullBtn.toolTip = "Run import + masks + registration + analysis (with skip detection)."
-        self.runMasksBtn = qt.QPushButton("Run Masks")
+        self.runMasksBtn = qt.QPushButton("Generate Masks")
         self.runMasksBtn.toolTip = "Generate/recompute masks from imported stacks."
-        self.runTimelapseBtn = qt.QPushButton("Run Timelapse")
-        self.runTimelapseBtn.toolTip = "Run timelapse registration pipeline (single-stack mode)."
-        self.runMultistackBtn = qt.QPushButton("Run + Multistack")
-        self.runMultistackBtn.toolTip = "Run timelapse including multistack correction."
+        self.runTimelapseBtn = qt.QPushButton("Timelapse Pipeline")
+        self.runTimelapseBtn.toolTip = (
+            "Run import + timelapse pipeline in regular mode, "
+            "while skipping automatic mask generation."
+        )
+        self.runMultistackBtn = qt.QPushButton("Timelapse + Multistack Pipeline")
+        self.runMultistackBtn.toolTip = (
+            "Run import + timelapse pipeline in multistack mode, "
+            "while skipping automatic mask generation."
+        )
         self.runAnalysisBtn = qt.QPushButton("Run Analysis")
         self.runAnalysisBtn.toolTip = "Re-run analysis only."
         self.cancelRunBtn = qt.QPushButton("Cancel current run")
@@ -468,7 +480,6 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.cancelRunBtn.enabled = False
         self.cancelRunBtn.toolTip = "Cancel the currently running pipeline step."
         buttons = [
-            self.runFullBtn,
             self.runMasksBtn,
             self.runTimelapseBtn,
             self.runMultistackBtn,
@@ -477,14 +488,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         ]
         for b in buttons:
             _cap_width(b, 180)
-        actionLayout.addWidget(self.runFullBtn, 0, 0)
-        actionLayout.addWidget(self.runMasksBtn, 0, 1)
-        actionLayout.addWidget(self.runTimelapseBtn, 1, 0)
-        actionLayout.addWidget(self.runMultistackBtn, 1, 1)
-        actionLayout.addWidget(self.runAnalysisBtn, 2, 0)
-        actionLayout.addWidget(self.cancelRunBtn, 2, 1)
+        actionLayout.addWidget(self.runMasksBtn, 0, 0)
+        actionLayout.addWidget(self.runTimelapseBtn, 0, 1)
+        actionLayout.addWidget(self.runMultistackBtn, 1, 0)
+        actionLayout.addWidget(self.runAnalysisBtn, 1, 1)
+        actionLayout.addWidget(self.cancelRunBtn, 2, 0)
 
-        self.runFullBtn.clicked.connect(self._on_run_full_pipeline)
         self.runMasksBtn.clicked.connect(self._on_run_masks)
         self.runTimelapseBtn.clicked.connect(self._on_run_timelapse)
         self.runMultistackBtn.clicked.connect(self._on_run_multistack)
@@ -767,6 +776,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self._show("[warning] Multistack sampling > 0.01 can be slow or unstable on some datasets.")
 
         return {
+            "import": {
+                # Do not fail when z-slices are not perfectly divisible by stack depth.
+                # Keep the last partial stack to preserve data coverage.
+                "on_incomplete_stack": "keep_last",
+            },
             "masks": {
                 "segmentation": {
                     "method": self.maskMethod.currentText,
@@ -834,7 +848,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _set_running_ui(self, is_running):
         running = bool(is_running)
-        for btn in [self.runFullBtn, self.runMasksBtn, self.runTimelapseBtn, self.runMultistackBtn, self.runAnalysisBtn]:
+        for btn in [self.runMasksBtn, self.runTimelapseBtn, self.runMultistackBtn, self.runAnalysisBtn]:
             btn.enabled = not running
         self.cancelRunBtn.enabled = running
 
@@ -881,6 +895,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             self.parseSummaryLabel.text = "Parse summary: failed"
             self.parseSummaryLabel.styleSheet = "color: #cc5500;"
             self._last_parsed_sessions = []
+            self._parsed_baseline_rows = []
             self._set_stage_status("parse", "error")
             msg = (
                 "Could not parse file naming. Check that filenames include subject/session and use expected tokens."
@@ -899,37 +914,286 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self._show(f"[parse] discovered {len(sessions)} sessions under {root}")
         self._last_parsed_sessions = list(sessions)
+        self._parsed_baseline_rows = [
+            (
+                str(getattr(s, "subject_id", "")).strip(),
+                str(getattr(s, "site", "")).strip().lower(),
+                str(getattr(s, "session_id", "")).strip(),
+                "-" if getattr(s, "stack_index", None) is None else str(int(getattr(s, "stack_index"))),
+            )
+            for s in sessions
+        ]
         self._populate_parse_table(sessions)
         self._refresh_patient_list()
         self._set_stage_status("parse", "done")
         self._set_user_message("success", "Parse successful", f"Discovered {len(sessions)} session(s).")
 
-    def _populate_parse_table(self, sessions):
-        self.parseTable.setRowCount(len(sessions))
-        self.parseSummaryLabel.text = f"Parse summary: {len(sessions)} session(s) discovered"
-        self.parseSummaryLabel.styleSheet = "color: #228b22;"
+    def _site_options(self):
+        return ["radius", "tibia", "knee"]
 
-        for row, session in enumerate(sessions):
-            subject = str(getattr(session, "subject_id", ""))
-            site = str(getattr(session, "site", ""))
-            session_id = str(getattr(session, "session_id", ""))
+    def _session_options(self, sessions):
+        default = ["T1", "T2", "T3", "T4", "T5", "BL", "FL", "C1", "C2", "C3"]
+        seen = set(default)
+        out = list(default)
+        for session in sessions:
+            sid = str(getattr(session, "session_id", "")).strip()
+            if sid and sid not in seen:
+                out.append(sid)
+                seen.add(sid)
+        return out
+
+    def _on_parse_table_item_changed(self, item):
+        if self._updating_parse_table or item is None:
+            return
+        row = int(item.row())
+        col = int(item.column())
+        if row < 0 or row >= len(self._last_parsed_sessions):
+            return
+        text = str(item.text() or "").strip()
+        if col == 0:
+            if text:
+                self._last_parsed_sessions[row].subject_id = text
+        elif col == 3:
+            if text == "-" or text == "":
+                self._last_parsed_sessions[row].stack_index = None
+            else:
+                try:
+                    stack_value = int(text)
+                    self._last_parsed_sessions[row].stack_index = stack_value if stack_value > 0 else None
+                except Exception:
+                    pass
+        self._refresh_patient_list()
+
+    def _on_parse_site_changed(self, row, text):
+        if self._updating_parse_table:
+            return
+        if row < 0 or row >= len(self._last_parsed_sessions):
+            return
+        site = str(text or "").strip().lower()
+        if not site:
+            return
+        self._last_parsed_sessions[row].site = site
+        self._refresh_patient_list()
+
+    def _on_parse_session_changed(self, row, text):
+        if self._updating_parse_table:
+            return
+        if row < 0 or row >= len(self._last_parsed_sessions):
+            return
+        session_id = str(text or "").strip()
+        if not session_id:
+            return
+        self._last_parsed_sessions[row].session_id = session_id
+        self._refresh_patient_list()
+
+    def _sanitize_name_token(self, text):
+        token = re.sub(r"[^A-Za-z0-9]+", "_", str(text or "").strip())
+        token = token.strip("_")
+        return token or "UNKNOWN"
+
+    def _site_to_token(self, site):
+        site_norm = str(site or "").strip().lower()
+        mapping = {
+            "radius": "DR",
+            "tibia": "DT",
+            "knee": "KN",
+        }
+        return mapping.get(site_norm, self._sanitize_name_token(site).upper())
+
+    def _mask_role_suffix(self, role):
+        role_norm = str(role or "").strip().lower()
+        if role_norm == "trab":
+            return "_TRAB_MASK"
+        if role_norm == "cort":
+            return "_CORT_MASK"
+        if role_norm == "full":
+            return "_FULL_MASK"
+        if role_norm == "regmask":
+            return "_REGMASK"
+        return "_" + self._sanitize_name_token(role).upper()
+
+    def _reset_temp_input_root(self):
+        if not self._temp_input_root:
+            return
+        try:
+            shutil.rmtree(self._temp_input_root, ignore_errors=True)
+        except Exception:
+            pass
+        self._temp_input_root = None
+
+    def _sync_sessions_from_parse_table(self):
+        if not self._last_parsed_sessions:
+            return
+        rows = min(int(self.parseTable.rowCount), len(self._last_parsed_sessions))
+        for row in range(rows):
+            session = self._last_parsed_sessions[row]
+            subj_item = self.parseTable.item(row, 0)
+            stack_item = self.parseTable.item(row, 3)
+            site_widget = self.parseTable.cellWidget(row, 1)
+            session_widget = self.parseTable.cellWidget(row, 2)
+
+            subject = str(subj_item.text() if subj_item else "").strip()
+            site = str(site_widget.currentText if site_widget else "").strip().lower()
+            session_id = str(session_widget.currentText if session_widget else "").strip()
+            stack_text = str(stack_item.text() if stack_item else "").strip()
+
+            if subject:
+                session.subject_id = subject
+            if site:
+                session.site = site
+            if session_id:
+                session.session_id = session_id
+            if stack_text in {"", "-"}:
+                session.stack_index = None
+            else:
+                try:
+                    stack_value = int(stack_text)
+                    session.stack_index = stack_value if stack_value > 0 else None
+                except Exception:
+                    pass
+
+    def _has_parse_overrides(self):
+        if not self._last_parsed_sessions or not self._parsed_baseline_rows:
+            return False
+        table_rows = int(self.parseTable.rowCount)
+        if table_rows != len(self._parsed_baseline_rows):
+            return False
+        for row in range(table_rows):
+            subj_item = self.parseTable.item(row, 0)
+            stack_item = self.parseTable.item(row, 3)
+            site_widget = self.parseTable.cellWidget(row, 1)
+            session_widget = self.parseTable.cellWidget(row, 2)
+            subj_ui = str(subj_item.text() if subj_item else "").strip()
+            site_ui = str(site_widget.currentText if site_widget else "").strip().lower()
+            ses_ui = str(session_widget.currentText if session_widget else "").strip()
+            stack_ui = str(stack_item.text() if stack_item else "").strip()
+            subj0, site0, ses0, stack0 = self._parsed_baseline_rows[row]
+            if (subj_ui, site_ui, ses_ui, stack_ui) != (subj0, site0, ses0, stack0):
+                return True
+        return False
+
+    def _make_run_input_root(self, dataset_root: Path):
+        self._sync_sessions_from_parse_table()
+        if not self._last_parsed_sessions or not self._has_parse_overrides():
+            return dataset_root
+
+        self._reset_temp_input_root()
+        tmp_root = Path(tempfile.mkdtemp(prefix="timelapsed_slicer_input_"))
+        created = 0
+
+        def _link_or_copy(src: Path, dst: Path):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.symlink(str(src), str(dst))
+            except Exception:
+                shutil.copy2(src, dst)
+
+        for session in self._last_parsed_sessions:
+            subject_id = self._sanitize_name_token(getattr(session, "subject_id", ""))
+            site_token = self._site_to_token(getattr(session, "site", "radius"))
+            session_id = self._sanitize_name_token(getattr(session, "session_id", ""))
             stack_index = getattr(session, "stack_index", None)
-            stack_text = "-" if stack_index is None else str(stack_index)
+            stack_chunk = ""
+            if stack_index is not None:
+                try:
+                    stack_chunk = f"_STACK{int(stack_index):02d}"
+                except Exception:
+                    stack_chunk = f"_STACK{self._sanitize_name_token(stack_index)}"
 
-            raw_image = getattr(session, "raw_image_path", None)
-            image_name = Path(raw_image).name if raw_image else "-"
+            base = f"{subject_id}_{site_token}{stack_chunk}_{session_id}"
+            image_src = Path(getattr(session, "raw_image_path"))
+            image_dst = tmp_root / f"{base}.AIM"
+            _link_or_copy(image_src, image_dst)
+            created += 1
 
             raw_masks = getattr(session, "raw_mask_paths", {}) or {}
-            mask_roles = ", ".join(sorted(str(k) for k in raw_masks.keys())) if raw_masks else "-"
+            for role, mask_path in raw_masks.items():
+                mask_src = Path(mask_path)
+                suffix = self._mask_role_suffix(role)
+                mask_dst = tmp_root / f"{base}{suffix}.AIM"
+                _link_or_copy(mask_src, mask_dst)
+                created += 1
 
             seg_path = getattr(session, "raw_seg_path", None)
-            seg_text = "yes" if seg_path else "no"
+            if seg_path:
+                seg_src = Path(seg_path)
+                seg_dst = tmp_root / f"{base}_SEG.AIM"
+                _link_or_copy(seg_src, seg_dst)
+                created += 1
 
-            values = [subject, site, session_id, stack_text, image_name, mask_roles, seg_text]
-            for col, value in enumerate(values):
-                self.parseTable.setItem(row, col, qt.QTableWidgetItem(value))
+        self._temp_input_root = str(tmp_root)
+        self._show(
+            f"[parse] using corrected parse labels via virtual input root: {tmp_root} ({created} file links)"
+        )
+        return tmp_root
 
-        self.parseTable.resizeColumnsToContents()
+    def _populate_parse_table(self, sessions):
+        self._updating_parse_table = True
+        try:
+            self.parseTable.setRowCount(len(sessions))
+            self.parseSummaryLabel.text = (
+                f"Parse summary: {len(sessions)} session(s) discovered "
+                "(Subject is editable. Site/Session are dropdown-correctable.)"
+            )
+            self.parseSummaryLabel.styleSheet = "color: #228b22;"
+            site_options = self._site_options()
+            session_options = self._session_options(sessions)
+
+            for row, session in enumerate(sessions):
+                subject = str(getattr(session, "subject_id", ""))
+                site = str(getattr(session, "site", ""))
+                session_id = str(getattr(session, "session_id", ""))
+                stack_index = getattr(session, "stack_index", None)
+                stack_text = "-" if stack_index is None else str(stack_index)
+
+                raw_image = getattr(session, "raw_image_path", None)
+                image_name = Path(raw_image).name if raw_image else "-"
+
+                raw_masks = getattr(session, "raw_mask_paths", {}) or {}
+                mask_roles = ", ".join(sorted(str(k) for k in raw_masks.keys())) if raw_masks else "-"
+
+                seg_path = getattr(session, "raw_seg_path", None)
+                seg_text = "yes" if seg_path else "no"
+
+                # Subject (editable text)
+                subject_item = qt.QTableWidgetItem(subject)
+                subject_item.setFlags(subject_item.flags() | qt.Qt.ItemIsEditable)
+                self.parseTable.setItem(row, 0, subject_item)
+
+                # Site (dropdown)
+                site_combo = qt.QComboBox()
+                site_combo.addItems(site_options)
+                site_current = site if site in site_options else "radius"
+                site_combo.setCurrentText(site_current)
+                site_combo.currentTextChanged.connect(
+                    lambda text, r=row: self._on_parse_site_changed(r, text)
+                )
+                self.parseTable.setCellWidget(row, 1, site_combo)
+
+                # Session (dropdown + editable)
+                ses_combo = qt.QComboBox()
+                ses_combo.setEditable(True)
+                ses_combo.addItems(session_options)
+                ses_combo.setCurrentText(session_id)
+                ses_combo.currentTextChanged.connect(
+                    lambda text, r=row: self._on_parse_session_changed(r, text)
+                )
+                self.parseTable.setCellWidget(row, 2, ses_combo)
+
+                # Stack
+                stack_item = qt.QTableWidgetItem(stack_text)
+                stack_item.setFlags(stack_item.flags() | qt.Qt.ItemIsEditable)
+                self.parseTable.setItem(row, 3, stack_item)
+
+                # Read-only informative columns
+                for col, value in [(4, image_name), (5, mask_roles), (6, seg_text)]:
+                    item = qt.QTableWidgetItem(value)
+                    item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
+                    self.parseTable.setItem(row, col, item)
+
+            self.parseTable.resizeColumnsToContents()
+        finally:
+            self._updating_parse_table = False
 
     def _require_pipeline_installed(self) -> bool:
         if self.logic.is_pipeline_available():
@@ -954,9 +1218,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
     def _on_run_masks(self):
         if not self._require_pipeline_installed():
             return
-        root = self._require_dataset_root()
-        if root is None:
+        source_root = self._require_dataset_root()
+        if source_root is None:
             return
+        run_root = self._make_run_input_root(source_root)
 
         cfg = self.logic.create_override_config(self._settings_override())
         imported = self._require_results_root("Could not resolve imported dataset path.")
@@ -967,7 +1232,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run_includes_analysis = False
         self._run_sequence(
             [
-                ["import", str(root), "--output-root", str(imported), "--config", cfg],
+                ["import", str(run_root), "--output-root", str(imported), "--config", cfg],
                 ["generate-masks", str(imported), "--config", cfg],
             ],
             stages=["masks", "masks"],
@@ -976,9 +1241,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
     def _on_run_timelapse(self):
         if not self._require_pipeline_installed():
             return
-        root = self._require_dataset_root()
-        if root is None:
+        source_root = self._require_dataset_root()
+        if source_root is None:
             return
+        run_root = self._make_run_input_root(source_root)
 
         imported = self._require_results_root()
         if imported is None:
@@ -989,14 +1255,27 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._is_full_pipeline_run = False
         self._run_includes_analysis = True
         cfg = self.logic.create_override_config(self._settings_override())
-        self._run(["run", str(root), "--output-root", str(imported), "--mode", "regular", "--config", cfg])
+        self._run(
+            [
+                "run",
+                str(run_root),
+                "--output-root",
+                str(imported),
+                "--mode",
+                "regular",
+                "--skip-mask-generation",
+                "--config",
+                cfg,
+            ]
+        )
 
     def _on_run_multistack(self):
         if not self._require_pipeline_installed():
             return
-        root = self._require_dataset_root()
-        if root is None:
+        source_root = self._require_dataset_root()
+        if source_root is None:
             return
+        run_root = self._make_run_input_root(source_root)
 
         imported = self._require_results_root()
         if imported is None:
@@ -1007,7 +1286,19 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._is_full_pipeline_run = False
         self._run_includes_analysis = True
         cfg = self.logic.create_override_config(self._settings_override())
-        self._run(["run", str(root), "--output-root", str(imported), "--mode", "multistack", "--config", cfg])
+        self._run(
+            [
+                "run",
+                str(run_root),
+                "--output-root",
+                str(imported),
+                "--mode",
+                "multistack",
+                "--skip-mask-generation",
+                "--config",
+                cfg,
+            ]
+        )
 
     def _on_run_analysis(self):
         if not self._require_pipeline_installed():
@@ -1045,10 +1336,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
     def _on_run_full_pipeline(self):
         if not self._require_pipeline_installed():
             return
-        root = self._require_dataset_root()
-        if root is None:
+        source_root = self._require_dataset_root()
+        if source_root is None:
             self._set_user_message("warn", "Select dataset folder", "Choose a dataset root first.")
             return
+        run_root = self._make_run_input_root(source_root)
         imported = self._require_results_root("Could not resolve imported dataset path.")
         if imported is None:
             return
@@ -1070,7 +1362,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run(
             [
                 "run",
-                str(root),
+                str(run_root),
                 "--output-root",
                 str(imported),
                 "--mode",
@@ -1110,7 +1402,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             for s in ("masks", "registration", "analysis"):
                 self._set_stage_status(s, "done")
         elif self._run_includes_analysis and int(exit_code) == 0:
-            self._set_stage_status("analysis", "done")
+            # Timelapse pipeline commands internally perform discovery/import
+            # and analysis, so mark all stages complete for clear 100% progress.
+            for s in ("dataset", "parse", "masks", "registration", "analysis"):
+                self._set_stage_status(s, "done")
         self._active_stage = None
         self._is_full_pipeline_run = False
         self._run_includes_analysis = False
