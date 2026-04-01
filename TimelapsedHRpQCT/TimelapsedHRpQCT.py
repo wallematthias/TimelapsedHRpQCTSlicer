@@ -102,13 +102,18 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
         self._temp_config_path = path
         return path
 
-    def parse_input(self, root_path):
+    def parse_input(self, root_path, force_header_discovery=False):
         try:
             from timelapsedhrpqct.config.loader import load_config
             from timelapsedhrpqct.dataset.discovery import discover_raw_sessions
 
             config = load_config(self.default_config_path())
-            sessions = discover_raw_sessions(root_path, config.discovery)
+            sessions = discover_raw_sessions(
+                root_path,
+                config.discovery,
+                force_header_discovery=bool(force_header_discovery),
+                canonicalize_sessions=bool(force_header_discovery),
+            )
             return sessions, None
         except Exception as exc:
             return [], str(exc)
@@ -133,6 +138,11 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
         # mixed with pip-installed ITK/ITKElastix components.
         if env.contains("ITK_AUTOLOAD_PATH"):
             env.remove("ITK_AUTOLOAD_PATH")
+        if env.contains("SITK_AUTOLOAD_PATH"):
+            env.remove("SITK_AUTOLOAD_PATH")
+        # Some launcher setups may repopulate these internally; force empty.
+        env.insert("ITK_AUTOLOAD_PATH", "")
+        env.insert("SITK_AUTOLOAD_PATH", "")
         proc.setProcessEnvironment(env)
 
         def _read_output():
@@ -154,7 +164,15 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
                         data = str(raw).encode("utf-8", errors="replace")
             text = data.decode("utf-8", errors="replace")
             if on_output and text:
-                on_output(text)
+                # Filter recurring harmless ITK/Slicer plugin noise.
+                filtered_lines = []
+                for line in text.splitlines(keepends=True):
+                    if "ImageIO factory did not return an ImageIOBase: MRMLIDImageIO" in line:
+                        continue
+                    filtered_lines.append(line)
+                filtered = "".join(filtered_lines)
+                if filtered:
+                    on_output(filtered)
 
         def _finished(*signal_args):
             self._proc = None
@@ -404,6 +422,28 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         _cap_width(self.resultsRootPath, 360)
         maskForm.addRow("Results folder (optional)", self.resultsRootPath)
 
+        self.copyRawInputsCheck = qt.QCheckBox()
+        self.copyRawInputsCheck.checked = False
+        self.copyRawInputsCheck.toolTip = (
+            "Copy raw AIM files into sourcedata/hrpqct during import."
+        )
+        self.restructureRawCheck = qt.QCheckBox()
+        self.restructureRawCheck.checked = False
+        self.restructureRawCheck.toolTip = (
+            "Move raw AIM files into results root sub-*/site-*/ses-* during import."
+        )
+        self.forceHeaderDiscoveryCheck = qt.QCheckBox()
+        self.forceHeaderDiscoveryCheck.checked = False
+        self.forceHeaderDiscoveryCheck.toolTip = (
+            "Force import parsing from AIM header metadata instead of filename parsing."
+        )
+        _cap_width(self.copyRawInputsCheck, 220)
+        _cap_width(self.restructureRawCheck, 220)
+        _cap_width(self.forceHeaderDiscoveryCheck, 220)
+        maskForm.addRow("Copy raw inputs", self.copyRawInputsCheck)
+        maskForm.addRow("Restructure raw inputs", self.restructureRawCheck)
+        maskForm.addRow("Force header discovery", self.forceHeaderDiscoveryCheck)
+
         registrationBox = qt.QGroupBox("Registration")
         registrationForm = qt.QFormLayout(registrationBox)
 
@@ -434,9 +474,16 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self.msSampling.decimals = 5
         self.msSampling.singleStep = 0.0001
         self.msSampling.value = 0.005
+        self.useMultistackCheck = qt.QCheckBox()
+        self.useMultistackCheck.checked = False
+        self.useMultistackCheck.toolTip = (
+            "When enabled, Timelapse Pipeline runs with multistack correction."
+        )
         _cap_width(self.msSampling, 220)
         _cap_width(self.msRes, 220)
         _cap_width(self.msIter, 220)
+        _cap_width(self.useMultistackCheck, 220)
+        registrationForm.addRow("Use multistack correction", self.useMultistackCheck)
         registrationForm.addRow("Multistack correction sampling", self.msSampling)
         registrationForm.addRow("Multistack correction resolutions", self.msRes)
         registrationForm.addRow("Multistack correction iterations", self.msIter)
@@ -461,19 +508,15 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         settingsLayout.addWidget(analysisBox)
 
         actionLayout = qt.QGridLayout()
-        self.runMasksBtn = qt.QPushButton("Generate Masks")
+        self.runMasksBtn = qt.QPushButton("1. Generate Masks")
         self.runMasksBtn.toolTip = "Generate/recompute masks from imported stacks."
-        self.runTimelapseBtn = qt.QPushButton("Timelapse Pipeline")
+        self.runTimelapseBtn = qt.QPushButton("2. Timelapse Pipeline")
         self.runTimelapseBtn.toolTip = (
-            "Run import + timelapse pipeline in regular mode, "
+            "Run import + timelapse pipeline (mode controlled by "
+            "'Use multistack correction' in Advanced Settings), "
             "while skipping automatic mask generation."
         )
-        self.runMultistackBtn = qt.QPushButton("Timelapse + Multistack Pipeline")
-        self.runMultistackBtn.toolTip = (
-            "Run import + timelapse pipeline in multistack mode, "
-            "while skipping automatic mask generation."
-        )
-        self.runAnalysisBtn = qt.QPushButton("Run Analysis")
+        self.runAnalysisBtn = qt.QPushButton("3. Re-run Analysis")
         self.runAnalysisBtn.toolTip = "Re-run analysis only."
         self.cancelRunBtn = qt.QPushButton("Cancel current run")
         self.cancelRunBtn.clicked.connect(self._on_cancel_run)
@@ -482,7 +525,6 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         buttons = [
             self.runMasksBtn,
             self.runTimelapseBtn,
-            self.runMultistackBtn,
             self.runAnalysisBtn,
             self.cancelRunBtn,
         ]
@@ -490,13 +532,11 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             _cap_width(b, 180)
         actionLayout.addWidget(self.runMasksBtn, 0, 0)
         actionLayout.addWidget(self.runTimelapseBtn, 0, 1)
-        actionLayout.addWidget(self.runMultistackBtn, 1, 0)
-        actionLayout.addWidget(self.runAnalysisBtn, 1, 1)
-        actionLayout.addWidget(self.cancelRunBtn, 2, 0)
+        actionLayout.addWidget(self.runAnalysisBtn, 1, 0)
+        actionLayout.addWidget(self.cancelRunBtn, 1, 1)
 
         self.runMasksBtn.clicked.connect(self._on_run_masks)
         self.runTimelapseBtn.clicked.connect(self._on_run_timelapse)
-        self.runMultistackBtn.clicked.connect(self._on_run_multistack)
         self.runAnalysisBtn.clicked.connect(self._on_run_analysis)
 
         statusBox = ctk.ctkCollapsibleButton()
@@ -848,7 +888,7 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
     def _set_running_ui(self, is_running):
         running = bool(is_running)
-        for btn in [self.runMasksBtn, self.runTimelapseBtn, self.runMultistackBtn, self.runAnalysisBtn]:
+        for btn in [self.runMasksBtn, self.runTimelapseBtn, self.runAnalysisBtn]:
             btn.enabled = not running
         self.cancelRunBtn.enabled = running
 
@@ -889,7 +929,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
 
         self._clear_user_message()
         self._set_stage_status("parse", "running")
-        sessions, err = self.logic.parse_input(root)
+        sessions, err = self.logic.parse_input(
+            root,
+            force_header_discovery=bool(
+                getattr(self.forceHeaderDiscoveryCheck, "checked", False)
+            ),
+        )
         if err:
             self.parseTable.setRowCount(0)
             self.parseSummaryLabel.text = "Parse summary: failed"
@@ -929,7 +974,17 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._set_user_message("success", "Parse successful", f"Discovered {len(sessions)} session(s).")
 
     def _site_options(self):
-        return ["radius", "tibia", "knee"]
+        return [
+            "radius",
+            "tibia",
+            "knee",
+            "radius_left",
+            "radius_right",
+            "tibia_left",
+            "tibia_right",
+            "knee_left",
+            "knee_right",
+        ]
 
     def _session_options(self, sessions):
         default = ["T1", "T2", "T3", "T4", "T5", "BL", "FL", "C1", "C2", "C3"]
@@ -997,6 +1052,12 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
             "radius": "DR",
             "tibia": "DT",
             "knee": "KN",
+            "radius_left": "RL",
+            "radius_right": "RR",
+            "tibia_left": "TL",
+            "tibia_right": "TR",
+            "knee_left": "KL",
+            "knee_right": "KR",
         }
         return mapping.get(site_norm, self._sanitize_name_token(site).upper())
 
@@ -1072,10 +1133,44 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 return True
         return False
 
-    def _make_run_input_root(self, dataset_root: Path):
+    def _raw_ingest_mode(self):
+        copy_raw = bool(getattr(self.copyRawInputsCheck, "checked", False))
+        restructure_raw = bool(getattr(self.restructureRawCheck, "checked", False))
+        if copy_raw and restructure_raw:
+            raise ValueError("Select either Copy raw inputs or Restructure raw inputs, not both.")
+        if restructure_raw:
+            return "restructure"
+        if copy_raw:
+            return "copy"
+        return "none"
+
+    def _raw_ingest_cli_flags(self, mode: str):
+        if mode == "copy":
+            return ["--copy-raw-inputs"]
+        if mode == "restructure":
+            return ["--restructure-raw"]
+        return []
+
+    def _raw_discovery_cli_flags(self):
+        if bool(getattr(self.forceHeaderDiscoveryCheck, "checked", False)):
+            return ["--force-header-discovery"]
+        return []
+
+    def _make_run_input_root(self, dataset_root: Path, ingest_mode: str = "none"):
         self._sync_sessions_from_parse_table()
         if not self._last_parsed_sessions or not self._has_parse_overrides():
             return dataset_root
+
+        if ingest_mode == "restructure":
+            self._set_user_message(
+                "warn",
+                "Restructure requires direct source paths",
+                (
+                    "Parse table edits create a temporary virtual input root. "
+                    "Disable 'Restructure raw inputs' or keep parse values as-is before running."
+                ),
+            )
+            return None
 
         self._reset_temp_input_root()
         tmp_root = Path(tempfile.mkdtemp(prefix="timelapsed_slicer_input_"))
@@ -1221,7 +1316,14 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         source_root = self._require_dataset_root()
         if source_root is None:
             return
-        run_root = self._make_run_input_root(source_root)
+        try:
+            raw_ingest_mode = self._raw_ingest_mode()
+        except ValueError as exc:
+            slicer.util.errorDisplay(str(exc))
+            return
+        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        if run_root is None:
+            return
 
         cfg = self.logic.create_override_config(self._settings_override())
         imported = self._require_results_root("Could not resolve imported dataset path.")
@@ -1232,7 +1334,16 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         self._run_includes_analysis = False
         self._run_sequence(
             [
-                ["import", str(run_root), "--output-root", str(imported), "--config", cfg],
+                [
+                    "import",
+                    str(run_root),
+                    "--output-root",
+                    str(imported),
+                    *self._raw_ingest_cli_flags(raw_ingest_mode),
+                    *self._raw_discovery_cli_flags(),
+                    "--config",
+                    cfg,
+                ],
                 ["generate-masks", str(imported), "--config", cfg],
             ],
             stages=["masks", "masks"],
@@ -1244,7 +1355,15 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         source_root = self._require_dataset_root()
         if source_root is None:
             return
-        run_root = self._make_run_input_root(source_root)
+        try:
+            raw_ingest_mode = self._raw_ingest_mode()
+        except ValueError as exc:
+            slicer.util.errorDisplay(str(exc))
+            return
+        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        if run_root is None:
+            return
+        mode = "multistack" if bool(self.useMultistackCheck.checked) else "regular"
 
         imported = self._require_results_root()
         if imported is None:
@@ -1262,39 +1381,10 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 "--output-root",
                 str(imported),
                 "--mode",
-                "regular",
+                mode,
                 "--skip-mask-generation",
-                "--config",
-                cfg,
-            ]
-        )
-
-    def _on_run_multistack(self):
-        if not self._require_pipeline_installed():
-            return
-        source_root = self._require_dataset_root()
-        if source_root is None:
-            return
-        run_root = self._make_run_input_root(source_root)
-
-        imported = self._require_results_root()
-        if imported is None:
-            return
-        self._set_stage_status("registration", "pending")
-        self._set_stage_status("analysis", "pending")
-        self._active_stage = "registration"
-        self._is_full_pipeline_run = False
-        self._run_includes_analysis = True
-        cfg = self.logic.create_override_config(self._settings_override())
-        self._run(
-            [
-                "run",
-                str(run_root),
-                "--output-root",
-                str(imported),
-                "--mode",
-                "multistack",
-                "--skip-mask-generation",
+                *self._raw_ingest_cli_flags(raw_ingest_mode),
+                *self._raw_discovery_cli_flags(),
                 "--config",
                 cfg,
             ]
@@ -1340,7 +1430,14 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
         if source_root is None:
             self._set_user_message("warn", "Select dataset folder", "Choose a dataset root first.")
             return
-        run_root = self._make_run_input_root(source_root)
+        try:
+            raw_ingest_mode = self._raw_ingest_mode()
+        except ValueError as exc:
+            slicer.util.errorDisplay(str(exc))
+            return
+        run_root = self._make_run_input_root(source_root, ingest_mode=raw_ingest_mode)
+        if run_root is None:
+            return
         imported = self._require_results_root("Could not resolve imported dataset path.")
         if imported is None:
             return
@@ -1367,6 +1464,8 @@ class TimelapsedHRpQCTWidget(ScriptedLoadableModuleWidget):
                 str(imported),
                 "--mode",
                 mode,
+                *self._raw_ingest_cli_flags(raw_ingest_mode),
+                *self._raw_discovery_cli_flags(),
                 "--config",
                 cfg,
             ]

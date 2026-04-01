@@ -36,6 +36,10 @@ This Slicer extension is a GUI wrapper around the main pipeline repository:
 - Method: `adaptive` or `global`
 - Lower threshold
 - Higher threshold
+- Raw ingest mode:
+  - default: keep raw files in place
+  - optional: copy raw files (`--copy-raw-inputs`)
+  - optional: restructure raw files (`--restructure-raw`)
 
 ### Registration
 
@@ -97,6 +101,12 @@ SAMPLE355_KN_FL1_ROI1.AIM
 ```
 
 If site or stack tokens are missing, the parser uses defaults from the pipeline config where possible, but explicit naming is strongly recommended.
+
+Notes:
+
+- Input discovery is recursive, so flat folders and nested BIDS/MIDS-style trees are both supported.
+- Parse supports generic and sided sites (`radius/tibia/knee` and `*_left/*_right` variants).
+- `Restructure raw inputs` is disabled when parse-table label overrides are active, because overrides run through a virtual input root.
 
 ## License
 
