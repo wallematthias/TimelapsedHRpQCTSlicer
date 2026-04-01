@@ -128,6 +128,11 @@ class TimelapsedHRpQCTLogic(ScriptedLoadableModuleLogic):
         proc.setProcessChannelMode(qt.QProcess.MergedChannels)
         env = qt.QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
+        # Avoid loading Slicer-specific ITK ImageIO plugins (e.g., MRMLIDImageIO)
+        # in the pipeline subprocess, which can cause noisy factory warnings when
+        # mixed with pip-installed ITK/ITKElastix components.
+        if env.contains("ITK_AUTOLOAD_PATH"):
+            env.remove("ITK_AUTOLOAD_PATH")
         proc.setProcessEnvironment(env)
 
         def _read_output():

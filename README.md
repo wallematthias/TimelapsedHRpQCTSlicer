@@ -67,33 +67,36 @@ Use this flow until the extension appears in the Slicer Extensions Manager.
 
 The module installs/updates `timelapsed-hrpqct` inside Slicer Python using the built-in button.
 
-## Official Extension Readiness
+## Expected Data Parsing Format
 
-This repository now includes:
+The parser expects AIM filenames that include:
 
-- Extension metadata in `CMakeLists.txt`
-- Icon wiring for module resources
-- Scripted smoke tests (`TimelapsedHRpQCTTest`)
-- Release notes scaffold (`CHANGELOG.md`)
+- subject identifier
+- site token (`DR`, `DT`, or `KN`)
+- session token (for example `T1`, `T2`, `C1`, `BL`, `FL`, `FL1`)
+- optional stack token for multistack data (`STACK01`, `STACK_01`, `STACK-01`)
+- optional mask roles (`TRAB_MASK`, `CORT_MASK`, `FULL_MASK`, `REGMASK`, `ROI1`, `ROI2`, ...)
 
-Before first public extension submission, complete:
+Examples:
 
-1. Replace placeholder screenshot URLs with real UI screenshots.
-2. Keep this README in sync with any UI changes.
-3. Tag a release in this repository.
-4. Submit to the Slicer Extensions Index.
+```text
+SUBJ001_DR_T1.AIM
+SUBJ001_DR_T1_TRAB_MASK.AIM
+SUBJ001_DR_T1_CORT_MASK.AIM
+SUBJ001_DR_T2.AIM
 
-## ExtensionsIndex Submission
+SUBJ010_DT_STACK01_T1.AIM
+SUBJ010_DT_STACK01_T1_TRAB_MASK.AIM
+SUBJ010_DT_STACK02_T1.AIM
+SUBJ010_DT_STACK02_T1_CORT_MASK.AIM
 
-This repository includes a submission template:
+SAMPLE355_KN_BL.AIM
+SAMPLE355_KN_FL1.AIM
+SAMPLE355_KN_FL1_REGMASK.AIM
+SAMPLE355_KN_FL1_ROI1.AIM
+```
 
-- `TimelapsedHRpQCTSlicer.s4ext`
-
-To submit:
-
-1. Fork `Slicer/ExtensionsIndex`.
-2. Copy `TimelapsedHRpQCTSlicer.s4ext` into your fork (top-level extension entries).
-3. Open a PR to `Slicer/ExtensionsIndex`.
+If site or stack tokens are missing, the parser uses defaults from the pipeline config where possible, but explicit naming is strongly recommended.
 
 ## License
 
