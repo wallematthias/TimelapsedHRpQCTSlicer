@@ -56,7 +56,7 @@ This Slicer extension is a GUI wrapper around the main pipeline repository:
    - `Parse summary` reports how many sessions were discovered.
    - In `Parse details`, you can correct `site` and `session` values if needed before running.
 5. Choose where results should be written:
-   - default: `<dataset_root>/TimelapsedHRpQCT_results`
+   - default: `<dataset_root>/TimelapsedHRpQCT`
    - optional: set `Results folder` to override.
 6. If you do not already have valid masks/contours, click `1. Generate Masks`.
 7. Click `2. Timelapse Pipeline` to run the timelapse processing and create remodelling outputs.
@@ -68,7 +68,7 @@ This Slicer extension is a GUI wrapper around the main pipeline repository:
 
 Pipeline outputs are saved in a structured MIDS/BIDS-style folder layout under the results root.
 
-- Default results root: `<dataset_root>/TimelapsedHRpQCT_results`
+- Default results root: `<dataset_root>/TimelapsedHRpQCT`
 - Optional override: `Results folder` field in the module
 - Typical organization: subject/site/session-based folders with derivative outputs grouped by processing stage
 
